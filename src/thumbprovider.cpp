@@ -235,6 +235,9 @@ HRESULT CSvgThumbnailProvider::RenderWithDirect2D(UINT cx, HBITMAP *phbmp)
 
         GetSvgSizeFromBuffer(svgBuf, svgSz, &svgW, &svgH);
         if (svgW > 0 && svgH > 0) { vpW = svgW; vpH = svgH; }
+        // Minimum viewport for sharp downscale (e.g. BTC width="100%"→100)
+        vpW = max(vpW, (FLOAT)cx * 2);
+        vpH = max(vpH, (FLOAT)cx * 2);
 
         // Create memory stream from the (possibly inlined) buffer
         HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, svgSz);
