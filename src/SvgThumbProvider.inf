@@ -1,0 +1,74 @@
+[Version]
+Signature       = "$Windows NT$"
+Provider        = "SvgNative"
+
+[DefaultInstall]
+CopyFiles = SvgFiles
+AddReg = SvgReg
+AddReg = PhotosReg
+
+[DefaultInstall.ntamd64]
+CopyFiles = SvgFiles
+AddReg = SvgReg
+AddReg = PhotosReg
+
+[DefaultInstall.ntx86]
+CopyFiles = SvgFiles
+AddReg = SvgReg
+AddReg = PhotosReg
+
+[DefaultUninstall]
+DelFiles = SvgFiles
+DelReg = SvgReg.Uninstall
+DelReg = PhotosReg.Uninstall
+
+[DefaultUninstall.ntamd64]
+DelFiles = SvgFiles
+DelReg = SvgReg.Uninstall
+DelReg = PhotosReg.Uninstall
+
+[DefaultUninstall.ntx86]
+DelFiles = SvgFiles
+DelReg = SvgReg.Uninstall
+DelReg = PhotosReg.Uninstall
+
+; Architecture-specific source paths
+; On x64: INF root parent/bin/x64/
+; On x86: INF root parent/bin/x86/
+[SourceDisksNames.ntamd64]
+1 = "SVG Thumbnail Provider",,,..\bin\x64
+
+[SourceDisksNames.ntx86]
+1 = "SVG Thumbnail Provider",,,..\bin\x86
+
+[SourceDisksFiles]
+SvgThumbProvider.dll = 1
+
+[DestinationDirs]
+SvgFiles = 11, SVG-NATIVE
+
+[SvgFiles]
+SvgThumbProvider.dll,,,32
+
+[SvgReg]
+HKCR, "CLSID\{9B2A1C9A-9E5D-4B5A-8F3A-5C6E8F1A2B3D}",,,"SVG Thumbnail Provider"
+HKCR, "CLSID\{9B2A1C9A-9E5D-4B5A-8F3A-5C6E8F1A2B3D}\InProcServer32",,,"%11%\SVG-NATIVE\SvgThumbProvider.dll"
+HKCR, "CLSID\{9B2A1C9A-9E5D-4B5A-8F3A-5C6E8F1A2B3D}\InProcServer32","ThreadingModel",,"Apartment"
+HKLM, "Software\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved","{9B2A1C9A-9E5D-4B5A-8F3A-5C6E8F1A2B3D}",,"SVG Thumbnail Provider"
+HKCR, ".svg\ShellEx\{E357FCCD-A995-4576-B01F-234630154E96}",,,"{9B2A1C9A-9E5D-4B5A-8F3A-5C6E8F1A2B3D}"
+HKCR, "SystemFileAssociations\.svg\ShellEx\{E357FCCD-A995-4576-B01F-234630154E96}",,,"{9B2A1C9A-9E5D-4B5A-8F3A-5C6E8F1A2B3D}"
+
+[SvgReg.Uninstall]
+HKCR, "CLSID\{9B2A1C9A-9E5D-4B5A-8F3A-5C6E8F1A2B3D}"
+HKLM, "Software\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved","{9B2A1C9A-9E5D-4B5A-8F3A-5C6E8F1A2B3D}"
+HKCR, ".svg\ShellEx\{E357FCCD-A995-4576-B01F-234630154E96}"
+HKCR, "SystemFileAssociations\.svg\ShellEx\{E357FCCD-A995-4576-B01F-234630154E96}"
+
+[PhotosReg]
+HKLM, "Software\Classes\Applications\Microsoft.Windows.Photos_8wekyb3d8bbwe\SupportedTypes",".svg",,
+
+[PhotosReg.Uninstall]
+HKLM, "Software\Classes\Applications\Microsoft.Windows.Photos_8wekyb3d8bbwe\SupportedTypes",".svg"
+
+[Strings]
+ProviderName     = "SvgNative"

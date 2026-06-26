@@ -1,0 +1,15 @@
+# Build artifacts
+build/x64/
+build/x86/
+*.obj
+*.exp
+*.lib
+
+# VS temp files
+*.sdf
+*.suo
+*.user
+.vs/
+
+# Test signing certs
+*.pfx
