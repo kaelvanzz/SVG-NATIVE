@@ -84,7 +84,8 @@ public:
 
 private:
     HRESULT RenderWithDirect2D(UINT cx, HBITMAP *phbmp);
-    HRESULT RenderFallback(UINT cx, HBITMAP *phbmp);
+    HRESULT RenderWithWic(UINT cx, HBITMAP *phbmp);
+    HRESULT RenderFallback(UINT cx, HBITMAP *phbmp, DWORD dwError = 0);
 
     LONG m_cRef;
     IStream *m_pStream;
