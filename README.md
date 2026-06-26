@@ -6,7 +6,7 @@ File Explorer SVG thumbnail provider using Direct2D/Direct3D WARP (software rend
 
 已提供预编译的 DLL：
 
-1. **以管理员身份** 右键 `src\SvgThumbProvider.inf` → **安装**
+1. **以管理员身份** 右键 `SvgThumbProvider.inf` → **安装**
 2. 重启 Explorer 或注销重登
 
 INF 会自动将对应架构（x64/x86）的 DLL 从 `bin\` 复制到 `C:\Program Files\SVG-NATIVE\` 并注册。
@@ -23,11 +23,11 @@ build\build.bat x64    (或 x86)
 
 ## 卸载
 
-以管理员身份右键 `src\SvgThumbProvider.inf` → **卸载**
+以管理员身份右键 `SvgThumbProvider.inf` → **卸载**
 
 或命令行：
 ```
-rundll32.exe setupapi,InstallHinfSection DefaultUninstall 128 "src\SvgThumbProvider.inf"
+rundll32.exe setupapi,InstallHinfSection DefaultUninstall 128 "SvgThumbProvider.inf"
 ```
 
 ## 说明

@@ -68,7 +68,7 @@ if not exist "%BIN_DIR%" mkdir "%BIN_DIR%"
 copy /y "%OUT_DIR%\%DLL_NAME%" "%BIN_DIR%\%DLL_NAME%" >nul
 echo Copied to %BIN_DIR%\%DLL_NAME%
 echo.
-echo To install, right-click src\SvgThumbProvider.inf -^> Install
+echo To install, right-click SvgThumbProvider.inf -^> Install
 echo (Admin required)
 
 endlocal

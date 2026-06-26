@@ -32,11 +32,14 @@ DelFiles = SvgFiles
 DelReg = SvgReg.Uninstall
 DelReg = PhotosReg.Uninstall
 
+; Architecture-specific source paths
+; On x64: INF root parent/bin/x64/
+; On x86: INF root parent/bin/x86/
 [SourceDisksNames.ntamd64]
-1 = "SVG Thumbnail Provider",,,..\bin\x64
+1 = "SVG Thumbnail Provider",,,bin\x64
 
 [SourceDisksNames.ntx86]
-1 = "SVG Thumbnail Provider",,,..\bin\x86
+1 = "SVG Thumbnail Provider",,,bin\x86
 
 [SourceDisksFiles]
 SvgThumbProvider.dll = 1
