@@ -6,7 +6,6 @@ const CLSID CLSID_SvgThumbnailProvider =
 const CLSID CLSID_SvgWicDecoder =
     { 0x11e7785d, 0x7bfe, 0x411c, { 0xad, 0x88, 0x48, 0x84, 0x9c, 0x9e, 0xe8, 0xb1 } };
 
-static void SanitizeSvg(char *buf);
 static HRESULT InlineSvgCss(const char *in, ULONG inSz, char **out, ULONG *outSz);
 static HRESULT GetSvgSizeFromBuffer(const char *buf, ULONG sz, float *pW, float *pH);
 static HRESULT GetSvgSizeFromStream(IStream *pStream, float *pW, float *pH);
@@ -298,9 +297,9 @@ HRESULT CSvgThumbnailProvider::RenderWithDirect2D(UINT cx, HBITMAP *phbmp)
     {
         STATSTG stat = {};
         hr = m_pStream->Stat(&stat, STATFLAG_NONAME);
-        if (FAILED(hr)) { pDC5->Release(); pFactory->Release(); pD3D->Release(); return MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x207); }
+        if (FAILED(hr)) { pDC5->Release(); pFactory->Release(); pD3D->Release(); return MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x210); }
         ULONG sz = (ULONG)stat.cbSize.QuadPart;
-        if (sz == 0 || sz > 4194304) { pDC5->Release(); pFactory->Release(); pD3D->Release(); return MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x207); }
+        if (sz == 0 || sz > 4194304) { pDC5->Release(); pFactory->Release(); pD3D->Release(); return MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x211); }
 
         char *buf = (char*)malloc(sz + 1);
         if (!buf) { pDC5->Release(); pFactory->Release(); pD3D->Release(); return E_OUTOFMEMORY; }
@@ -320,7 +319,6 @@ HRESULT CSvgThumbnailProvider::RenderWithDirect2D(UINT cx, HBITMAP *phbmp)
             svgBuf = inlined;
         }
 
-        SanitizeSvg(svgBuf);
         GetSvgSizeFromBuffer(svgBuf, svgSz, &svgW, &svgH);
         if (svgW > 0 && svgH > 0) { vpW = svgW; vpH = svgH; }
         // Minimum viewport for sharp downscale (e.g. BTC width="100%"→100)
@@ -338,12 +336,12 @@ HRESULT CSvgThumbnailProvider::RenderWithDirect2D(UINT cx, HBITMAP *phbmp)
         if (svgBuf != buf) free(svgBuf);
         else free(buf);
     }
-    if (!pSvgStream) { pDC5->Release(); pFactory->Release(); pD3D->Release(); return MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x207); }
+    if (!pSvgStream) { pDC5->Release(); pFactory->Release(); pD3D->Release(); return MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x212); }
 
     ID2D1SvgDocument *pSvg = nullptr;
     hr = pDC5->CreateSvgDocument(pSvgStream, D2D1::SizeF(vpW, vpH), &pSvg);
     pSvgStream->Release();
-    if (FAILED(hr)) { pDC5->Release(); pFactory->Release(); pD3D->Release(); return MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x207); }
+    if (FAILED(hr)) { pDC5->Release(); pFactory->Release(); pD3D->Release(); return MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x213); }
 
     // Create render target at full viewport size to avoid clipping
     // D2D clips to the render target bounds regardless of viewport
@@ -501,67 +499,11 @@ static HRESULT GetSvgSizeFromBuffer(const char *buf, ULONG sz, float *pW, float 
     char *w = strstr(tag, "width=\"");
     char *h = strstr(tag, "height=\"");
     float fw = 0, fh = 0;
-    BOOL pctW = FALSE, pctH = FALSE;
-    if (w) {
-        sscanf_s(w + 7, "%f", &fw);
-        if (strchr(w + 7, '%')) pctW = TRUE;
-    }
-    if (h) {
-        sscanf_s(h + 8, "%f", &fh);
-        if (strchr(h + 8, '%')) pctH = TRUE;
-    }
-    if (pctW || pctH) { fw = 0; fh = 0; }
-
-    if (fw <= 0 || fh <= 0) {
-        char *vb = strstr(tag, "viewBox=\"");
-        if (vb) {
-            vb += 9;
-            for (char *p = vb; *p && *p != '"'; p++) if (*p == ',') *p = ' ';
-            float vx, vy, vw, vh;
-            if (sscanf_s(vb, "%f %f %f %f", &vx, &vy, &vw, &vh) == 4) {
-                if (fw <= 0) fw = vw;
-                if (fh <= 0) fh = vh;
-            }
-        }
-    }
-
+    if (w) sscanf_s(w + 7, "%f", &fw);
+    if (h) sscanf_s(h + 8, "%f", &fh);
     free(tag);
     if (fw > 0 && fh > 0) { *pW = fw; *pH = fh; return S_OK; }
     return S_FALSE;
-}
-
-static void SanitizeSvg(char *buf)
-{
-    if (!buf) return;
-    char *svg = strstr(buf, "<svg");
-    if (!svg) return;
-    char *end = strchr(svg, '>');
-    if (!end) return;
-    for (char *p = svg; p < end; p++)
-    {
-        if (_strnicmp(p, "enable-background", 17) == 0)
-        {
-            while (p < end && *p != ';' && *p != '"') *p++ = ' ';
-            if (p < end && *p == ';') *p = ' ';
-            continue;
-        }
-        if (_strnicmp(p, "xml:space", 9) == 0)
-        {
-            while (p < end && *p != ' ') *p++ = ' ';
-            continue;
-        }
-        if ((*p == 'x' || *p == 'y') && *(p+1) == '=')
-        {
-            char *val = p + 2;
-            if (*val == '"' && (*(val+1) == '0' || _strnicmp(val+1, "0px", 3) == 0))
-            {
-                BOOL ok = TRUE;
-                char *q = val + 1; while (*q && *q != '"') q++;
-                if (*q != '"') ok = FALSE;
-                if (ok) { while (p <= q) *p++ = ' '; continue; }
-            }
-        }
-    }
 }
 
 // Inlines CSS classes from <style> blocks into inline fill/stroke attributes.
@@ -635,7 +577,7 @@ static HRESULT InlineSvgCss(const char *in, ULONG inSz, char **out, ULONG *outSz
         memset(p, ' ', endStyle + 8 - p);
         p = endStyle + 8;
     }
-    if (nRules == 0) { return S_FALSE; }
+    if (nRules == 0) { free(buf); return S_FALSE; }
 
     // Build output: copy buf with inlined attributes
     char *outBuf = (char*)malloc(inSz * 2 + 1);
@@ -691,6 +633,7 @@ static HRESULT InlineSvgCss(const char *in, ULONG inSz, char **out, ULONG *outSz
         src = end + 1;
     }
     *dst = 0;
+    free(buf);
     *out = outBuf;
     *outSz = (ULONG)strlen(outBuf);
     return S_OK;

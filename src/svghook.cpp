@@ -368,23 +368,6 @@ static void SanitizeSvg(char *buf)
         {
             while (p < end && *p != ';' && *p != '"') *p++ = ' ';
             if (p < end && *p == ';') *p = ' ';
-            continue;
-        }
-        if (_strnicmp(p, "xml:space", 9) == 0)
-        {
-            while (p < end && *p != ' ') *p++ = ' ';
-            continue;
-        }
-        if ((*p == 'x' || *p == 'y') && *(p+1) == '=')
-        {
-            char *val = p + 2;
-            if (*val == '"' && (*(val+1) == '0' || _strnicmp(val+1, "0px", 3) == 0))
-            {
-                BOOL ok = TRUE;
-                char *q = val + 1; while (*q && *q != '"') q++;
-                if (*q != '"') ok = FALSE;
-                if (ok) { while (p <= q) *p++ = ' '; continue; }
-            }
         }
     }
 }

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+         IgnorableNamespaces="uap3">
+
+  <Identity Name="Native.SVGCodec"
+            Publisher="CN=SVGCodec"
+            Version="1.0.0.0" />
+
+  <Properties>
+    <DisplayName>SVG WIC Codec</DisplayName>
+    <PublisherDisplayName>NATIVE</PublisherDisplayName>
+    <Description>Direct2D-based native SVG WIC decoder for Windows</Description>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Universal"
+                        MinVersion="10.0.17763.0"
+                        MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="x-generate" />
+  </Resources>
+
+  <Extensions>
+    <uap3:Extension Category="windows.imageCodec">
+      <uap3:ImageCodec>
+        <uap3:Format GUID="{a6ba1b82-2489-4b33-9f3a-ca6b5c3a9a4b}" />
+        <uap3:MimeType Value="image/svg+xml" />
+        <uap3:FileExtension Value=".svg" />
+        <uap3:Decoder CLSID="{11E7785D-7BFE-411C-AD88-48849C9EE8B1}" />
+      </uap3:ImageCodec>
+    </uap3:Extension>
+  </Extensions>
+
+</Package>
