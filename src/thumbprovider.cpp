@@ -3,9 +3,15 @@
 
 const CLSID CLSID_SvgThumbnailProvider =
     { 0x9b2a1c9a, 0x9e5d, 0x4b5a, { 0x8f, 0x3a, 0x5c, 0x6e, 0x8f, 0x1a, 0x2b, 0x3d } };
+const CLSID CLSID_SvgWicDecoder =
+    { 0x11e7785d, 0x7bfe, 0x411c, { 0xad, 0x88, 0x48, 0x84, 0x9c, 0x9e, 0xe8, 0xb1 } };
 
+static void SanitizeSvg(char *buf);
 static HRESULT InlineSvgCss(const char *in, ULONG inSz, char **out, ULONG *outSz);
 static HRESULT GetSvgSizeFromBuffer(const char *buf, ULONG sz, float *pW, float *pH);
+static HRESULT GetSvgSizeFromStream(IStream *pStream, float *pW, float *pH);
+static HRESULT RenderSvgToBuffer(IStream *pStream, UINT width, UINT height, UINT stride, BYTE *pixels);
+static HRESULT CreateWicDecoderInstance(REFIID riid, void **ppv);
 
 static HINSTANCE g_hInst;
 static long g_cLock;
@@ -19,21 +25,103 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 HRESULT __stdcall DllGetClassObject(REFCLSID rclsid, REFIID riid, void **ppv)
 {
     *ppv = nullptr;
-    if (!IsEqualCLSID(rclsid, CLSID_SvgThumbnailProvider))
-        return CLASS_E_CLASSNOTAVAILABLE;
-
-    CThumbProviderClassFactory *pFactory = new (std::nothrow) CThumbProviderClassFactory();
-    if (!pFactory)
-        return E_OUTOFMEMORY;
-
-    HRESULT hr = pFactory->QueryInterface(riid, ppv);
-    pFactory->Release();
-    return hr;
+    if (IsEqualCLSID(rclsid, CLSID_SvgThumbnailProvider))
+    {
+        CThumbProviderClassFactory *pFactory = new (std::nothrow) CThumbProviderClassFactory();
+        if (!pFactory) return E_OUTOFMEMORY;
+        HRESULT hr = pFactory->QueryInterface(riid, ppv);
+        pFactory->Release();
+        return hr;
+    }
+    if (IsEqualCLSID(rclsid, CLSID_SvgWicDecoder))
+        return CreateWicDecoderInstance(riid, ppv);
+    return CLASS_E_CLASSNOTAVAILABLE;
 }
 
 HRESULT __stdcall DllCanUnloadNow()
 {
     return g_cLock > 0 ? S_FALSE : S_OK;
+}
+
+static void RegWicDecoder(const WCHAR *modulePath)
+{
+    HKEY hKey;
+    WCHAR keyPath[MAX_PATH];
+    LPCWSTR clsid = L"{11E7785D-7BFE-411C-AD88-48849C9EE8B1}";
+    LPCWSTR fmtGUID = L"{a6ba1b82-2489-4b33-9f3a-ca6b5c3a9a4b}";
+    LPCWSTR cat = L"{7ED96837-96F0-4812-B211-F13C24117ED3}";
+    LPCWSTR vendor = L"{F0E749CA-EDEF-4589-A73A-EE0E626A2A2B}";
+    DWORD flags = 0x3;
+    DWORD priority = 0x1;
+
+    // Clean up old Patterns key (removed in v2 - WIC discovery was breaking on it)
+    StringCchPrintfW(keyPath, MAX_PATH, L"CLSID\\%s\\Patterns", clsid);
+    RegDeleteTreeW(HKEY_CLASSES_ROOT, keyPath);
+
+    // CLSID
+    StringCchPrintfW(keyPath, MAX_PATH, L"CLSID\\%s", clsid);
+    if (SUCCEEDED(HRESULT_FROM_WIN32(RegCreateKeyExW(HKEY_CLASSES_ROOT, keyPath, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr))))
+    {
+        RegSetValueExW(hKey, nullptr, 0, REG_SZ, (BYTE*)L"SVG WIC Decoder", 30);
+        RegSetValueExW(hKey, L"ContainerFormat", 0, REG_SZ, (BYTE*)fmtGUID, (DWORD)((wcslen(fmtGUID) + 1) * sizeof(WCHAR)));
+        RegSetValueExW(hKey, L"FriendlyName", 0, REG_SZ, (BYTE*)L"SVG WIC Decoder", 30);
+        RegSetValueExW(hKey, L"Description", 0, REG_SZ, (BYTE*)L"SVG WIC Decoder", 30);
+        RegSetValueExW(hKey, L"Author", 0, REG_SZ, (BYTE*)L"NATIVE", 14);
+        RegSetValueExW(hKey, L"Vendor", 0, REG_SZ, (BYTE*)vendor, (DWORD)((wcslen(vendor) + 1) * sizeof(WCHAR)));
+        RegSetValueExW(hKey, L"FileExtensions", 0, REG_SZ, (BYTE*)L".svg", 8);
+        RegSetValueExW(hKey, L"MimeTypes", 0, REG_SZ, (BYTE*)L"image/svg+xml", 26);
+        RegSetValueExW(hKey, L"SpecVersion", 0, REG_SZ, (BYTE*)L"1.0.0.0", 14);
+        RegSetValueExW(hKey, L"Version", 0, REG_SZ, (BYTE*)L"1.0.0.0", 14);
+        RegSetValueExW(hKey, L"Flags", 0, REG_DWORD, (BYTE*)&flags, sizeof(flags));
+        RegSetValueExW(hKey, L"ArbitrationPriority", 0, REG_DWORD, (BYTE*)&priority, sizeof(priority));
+        RegCloseKey(hKey);
+    }
+
+    // InProcServer32
+    StringCchPrintfW(keyPath, MAX_PATH, L"CLSID\\%s\\InProcServer32", clsid);
+    if (SUCCEEDED(HRESULT_FROM_WIN32(RegCreateKeyExW(HKEY_CLASSES_ROOT, keyPath, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr))))
+    {
+        DWORD len = (DWORD)((wcslen(modulePath) + 1) * sizeof(WCHAR));
+        RegSetValueExW(hKey, nullptr, 0, REG_SZ, (BYTE*)modulePath, len);
+        RegSetValueExW(hKey, L"ThreadingModel", 0, REG_SZ, (BYTE*)L"Both", 10);
+        RegCloseKey(hKey);
+    }
+
+    // Categories - mark as WIC Bitmap Decoder
+    StringCchPrintfW(keyPath, MAX_PATH, L"CLSID\\%s\\Categories\\%s", clsid, cat);
+    if (SUCCEEDED(HRESULT_FROM_WIN32(RegCreateKeyExW(HKEY_CLASSES_ROOT, keyPath, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr))))
+        RegCloseKey(hKey);
+
+    // Instance - required for WIC enumeration
+    StringCchPrintfW(keyPath, MAX_PATH, L"CLSID\\%s\\Instance\\%s", cat, clsid);
+    if (SUCCEEDED(HRESULT_FROM_WIN32(RegCreateKeyExW(HKEY_CLASSES_ROOT, keyPath, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr))))
+    {
+        RegSetValueExW(hKey, L"CLSID", 0, REG_SZ, (BYTE*)clsid, (DWORD)((wcslen(clsid) + 1) * sizeof(WCHAR)));
+        RegSetValueExW(hKey, L"FriendlyName", 0, REG_SZ, (BYTE*)L"SVG WIC Decoder", 30);
+        RegCloseKey(hKey);
+    }
+
+    // Formats - 32bppBGRA output format
+    LPCWSTR fmt32 = L"{6FDDC324-4E03-4BFE-B185-3D77768DC90D}";
+    StringCchPrintfW(keyPath, MAX_PATH, L"CLSID\\%s\\Formats\\%s", clsid, fmt32);
+    if (SUCCEEDED(HRESULT_FROM_WIN32(RegCreateKeyExW(HKEY_CLASSES_ROOT, keyPath, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr))))
+        RegCloseKey(hKey);
+
+    // MIME database mapping: make image/svg+xml point to our decoder
+    StringCchPrintfW(keyPath, MAX_PATH, L"MIME\\Database\\Content Type\\image/svg+xml");
+    if (SUCCEEDED(HRESULT_FROM_WIN32(RegCreateKeyExW(HKEY_CLASSES_ROOT, keyPath, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr))))
+    {
+        RegSetValueExW(hKey, L"CLSID", 0, REG_SZ, (BYTE*)clsid, (DWORD)((wcslen(clsid) + 1) * sizeof(WCHAR)));
+        RegSetValueExW(hKey, L"Extension", 0, REG_SZ, (BYTE*)L".svg", 10);
+        RegCloseKey(hKey);
+    }
+}
+
+static void UnregWicDecoder()
+{
+    RegDeleteTreeW(HKEY_CLASSES_ROOT, L"CLSID\\{11E7785D-7BFE-411C-AD88-48849C9EE8B1}");
+    RegDeleteTreeW(HKEY_CLASSES_ROOT, L"CLSID\\{7ED96837-96F0-4812-B211-F13C24117ED3}\\Instance\\{11E7785D-7BFE-411C-AD88-48849C9EE8B1}");
+    RegDeleteTreeW(HKEY_CLASSES_ROOT, L"MIME\\Database\\Content Type\\image/svg+xml");
 }
 
 HRESULT __stdcall DllRegisterServer()
@@ -43,17 +131,17 @@ HRESULT __stdcall DllRegisterServer()
     if (!GetModuleFileNameW(g_hInst, szModulePath, MAX_PATH))
         return HRESULT_FROM_WIN32(GetLastError());
 
-    LPCWSTR clsid = L"{9B2A1C9A-9E5D-4B5A-8F3A-5C6E8F1A2B3D}";
+    LPCWSTR tpClsid = L"{9B2A1C9A-9E5D-4B5A-8F3A-5C6E8F1A2B3D}";
     WCHAR keyPath[MAX_PATH];
 
-    StringCchPrintfW(keyPath, MAX_PATH, L"CLSID\\%s", clsid);
+    StringCchPrintfW(keyPath, MAX_PATH, L"CLSID\\%s", tpClsid);
     if (SUCCEEDED(HRESULT_FROM_WIN32(RegCreateKeyExW(HKEY_CLASSES_ROOT, keyPath, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr))))
     {
         RegSetValueExW(hKey, nullptr, 0, REG_SZ, (BYTE*)L"SVG Thumbnail Provider", 42);
         RegCloseKey(hKey);
     }
 
-    StringCchPrintfW(keyPath, MAX_PATH, L"CLSID\\%s\\InProcServer32", clsid);
+    StringCchPrintfW(keyPath, MAX_PATH, L"CLSID\\%s\\InProcServer32", tpClsid);
     if (SUCCEEDED(HRESULT_FROM_WIN32(RegCreateKeyExW(HKEY_CLASSES_ROOT, keyPath, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr))))
     {
         DWORD len = (DWORD)((wcslen(szModulePath) + 1) * sizeof(WCHAR));
@@ -65,42 +153,41 @@ HRESULT __stdcall DllRegisterServer()
     WCHAR approvedPath[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Shell Extensions\\Approved";
     if (SUCCEEDED(HRESULT_FROM_WIN32(RegCreateKeyExW(HKEY_LOCAL_MACHINE, approvedPath, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr))))
     {
-        RegSetValueExW(hKey, clsid, 0, REG_SZ, (BYTE*)L"SVG Thumbnail Provider", 46);
+        RegSetValueExW(hKey, tpClsid, 0, REG_SZ, (BYTE*)L"SVG Thumbnail Provider", 46);
         RegCloseKey(hKey);
     }
 
     WCHAR thumbHandler[] = L".svg\\ShellEx\\{E357FCCD-A995-4576-B01F-234630154E96}";
     if (SUCCEEDED(HRESULT_FROM_WIN32(RegCreateKeyExW(HKEY_CLASSES_ROOT, thumbHandler, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr))))
     {
-        RegSetValueExW(hKey, nullptr, 0, REG_SZ, (BYTE*)clsid, (DWORD)((wcslen(clsid) + 1) * sizeof(WCHAR)));
+        RegSetValueExW(hKey, nullptr, 0, REG_SZ, (BYTE*)tpClsid, (DWORD)((wcslen(tpClsid) + 1) * sizeof(WCHAR)));
         RegCloseKey(hKey);
     }
 
     WCHAR sysAssoc[] = L"SystemFileAssociations\\.svg\\ShellEx\\{E357FCCD-A995-4576-B01F-234630154E96}";
     if (SUCCEEDED(HRESULT_FROM_WIN32(RegCreateKeyExW(HKEY_CLASSES_ROOT, sysAssoc, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr))))
     {
-        RegSetValueExW(hKey, nullptr, 0, REG_SZ, (BYTE*)clsid, (DWORD)((wcslen(clsid) + 1) * sizeof(WCHAR)));
+        RegSetValueExW(hKey, nullptr, 0, REG_SZ, (BYTE*)tpClsid, (DWORD)((wcslen(tpClsid) + 1) * sizeof(WCHAR)));
         RegCloseKey(hKey);
     }
+
+    RegWicDecoder(szModulePath);
 
     return S_OK;
 }
 
 HRESULT __stdcall DllUnregisterServer()
 {
-    LPCWSTR clsid = L"{9B2A1C9A-9E5D-4B5A-8F3A-5C6E8F1A2B3D}";
-    WCHAR keyPath[MAX_PATH];
-
-    StringCchPrintfW(keyPath, MAX_PATH, L"CLSID\\%s", clsid);
-    RegDeleteTreeW(HKEY_CLASSES_ROOT, keyPath);
-
+    RegDeleteTreeW(HKEY_CLASSES_ROOT, L"CLSID\\{9B2A1C9A-9E5D-4B5A-8F3A-5C6E8F1A2B3D}");
     RegDeleteTreeW(HKEY_CLASSES_ROOT, L".svg\\ShellEx\\{E357FCCD-A995-4576-B01F-234630154E96}");
     RegDeleteTreeW(HKEY_CLASSES_ROOT, L"SystemFileAssociations\\.svg\\ShellEx\\{E357FCCD-A995-4576-B01F-234630154E96}");
+
+    UnregWicDecoder();
 
     HKEY hKey;
     if (SUCCEEDED(RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\Shell Extensions\\Approved", 0, KEY_WRITE, &hKey)))
     {
-        RegDeleteValueW(hKey, clsid);
+        RegDeleteValueW(hKey, L"{9B2A1C9A-9E5D-4B5A-8F3A-5C6E8F1A2B3D}");
         RegCloseKey(hKey);
     }
 
@@ -213,7 +300,7 @@ HRESULT CSvgThumbnailProvider::RenderWithDirect2D(UINT cx, HBITMAP *phbmp)
         hr = m_pStream->Stat(&stat, STATFLAG_NONAME);
         if (FAILED(hr)) { pDC5->Release(); pFactory->Release(); pD3D->Release(); return MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x207); }
         ULONG sz = (ULONG)stat.cbSize.QuadPart;
-        if (sz == 0 || sz > 256 * 1024) { pDC5->Release(); pFactory->Release(); pD3D->Release(); return MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x207); }
+        if (sz == 0 || sz > 4194304) { pDC5->Release(); pFactory->Release(); pD3D->Release(); return MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x207); }
 
         char *buf = (char*)malloc(sz + 1);
         if (!buf) { pDC5->Release(); pFactory->Release(); pD3D->Release(); return E_OUTOFMEMORY; }
@@ -227,12 +314,13 @@ HRESULT CSvgThumbnailProvider::RenderWithDirect2D(UINT cx, HBITMAP *phbmp)
         char *svgBuf = buf;
         ULONG svgSz = sz;
         char *inlined = nullptr;
-        if (strstr(buf, "<style") && SUCCEEDED(InlineSvgCss(buf, sz, &inlined, &svgSz)))
+        if (strstr(buf, "<style") && SUCCEEDED(InlineSvgCss(buf, sz, &inlined, &svgSz)) && inlined)
         {
             free(buf);
             svgBuf = inlined;
         }
 
+        SanitizeSvg(svgBuf);
         GetSvgSizeFromBuffer(svgBuf, svgSz, &svgW, &svgH);
         if (svgW > 0 && svgH > 0) { vpW = svgW; vpH = svgH; }
         // Minimum viewport for sharp downscale (e.g. BTC width="100%"→100)
@@ -403,7 +491,6 @@ static HRESULT GetSvgSizeFromBuffer(const char *buf, ULONG sz, float *pW, float 
     if (!svg || svg >= buf + sz) return S_FALSE;
     const char *endSvg = strchr(svg, '>');
     if (!endSvg || endSvg >= buf + sz) return S_FALSE;
-    // Work on a temporary null-terminated copy of the <svg...> tag
     ptrdiff_t tagLen = endSvg - svg;
     if (tagLen <= 0 || tagLen > 4096) return S_FALSE;
     char *tag = (char*)malloc((size_t)tagLen + 1);
@@ -414,18 +501,74 @@ static HRESULT GetSvgSizeFromBuffer(const char *buf, ULONG sz, float *pW, float 
     char *w = strstr(tag, "width=\"");
     char *h = strstr(tag, "height=\"");
     float fw = 0, fh = 0;
-    if (w) sscanf_s(w + 7, "%f", &fw);
-    if (h) sscanf_s(h + 8, "%f", &fh);
+    BOOL pctW = FALSE, pctH = FALSE;
+    if (w) {
+        sscanf_s(w + 7, "%f", &fw);
+        if (strchr(w + 7, '%')) pctW = TRUE;
+    }
+    if (h) {
+        sscanf_s(h + 8, "%f", &fh);
+        if (strchr(h + 8, '%')) pctH = TRUE;
+    }
+    if (pctW || pctH) { fw = 0; fh = 0; }
+
+    if (fw <= 0 || fh <= 0) {
+        char *vb = strstr(tag, "viewBox=\"");
+        if (vb) {
+            vb += 9;
+            for (char *p = vb; *p && *p != '"'; p++) if (*p == ',') *p = ' ';
+            float vx, vy, vw, vh;
+            if (sscanf_s(vb, "%f %f %f %f", &vx, &vy, &vw, &vh) == 4) {
+                if (fw <= 0) fw = vw;
+                if (fh <= 0) fh = vh;
+            }
+        }
+    }
+
     free(tag);
     if (fw > 0 && fh > 0) { *pW = fw; *pH = fh; return S_OK; }
     return S_FALSE;
+}
+
+static void SanitizeSvg(char *buf)
+{
+    if (!buf) return;
+    char *svg = strstr(buf, "<svg");
+    if (!svg) return;
+    char *end = strchr(svg, '>');
+    if (!end) return;
+    for (char *p = svg; p < end; p++)
+    {
+        if (_strnicmp(p, "enable-background", 17) == 0)
+        {
+            while (p < end && *p != ';' && *p != '"') *p++ = ' ';
+            if (p < end && *p == ';') *p = ' ';
+            continue;
+        }
+        if (_strnicmp(p, "xml:space", 9) == 0)
+        {
+            while (p < end && *p != ' ') *p++ = ' ';
+            continue;
+        }
+        if ((*p == 'x' || *p == 'y') && *(p+1) == '=')
+        {
+            char *val = p + 2;
+            if (*val == '"' && (*(val+1) == '0' || _strnicmp(val+1, "0px", 3) == 0))
+            {
+                BOOL ok = TRUE;
+                char *q = val + 1; while (*q && *q != '"') q++;
+                if (*q != '"') ok = FALSE;
+                if (ok) { while (p <= q) *p++ = ' '; continue; }
+            }
+        }
+    }
 }
 
 // Inlines CSS classes from <style> blocks into inline fill/stroke attributes.
 // Takes input buffer + size, allocates output buffer with inlined CSS.
 static HRESULT InlineSvgCss(const char *in, ULONG inSz, char **out, ULONG *outSz)
 {
-    *out = nullptr; *outSz = 0;
+    *out = nullptr;
     if (!strstr(in, "<style")) return S_FALSE;
 
     char *buf = (char*)malloc(inSz + 1);
@@ -492,7 +635,7 @@ static HRESULT InlineSvgCss(const char *in, ULONG inSz, char **out, ULONG *outSz
         memset(p, ' ', endStyle + 8 - p);
         p = endStyle + 8;
     }
-    if (nRules == 0) { free(buf); return S_FALSE; }
+    if (nRules == 0) { return S_FALSE; }
 
     // Build output: copy buf with inlined attributes
     char *outBuf = (char*)malloc(inSz * 2 + 1);
@@ -548,7 +691,6 @@ static HRESULT InlineSvgCss(const char *in, ULONG inSz, char **out, ULONG *outSz
         src = end + 1;
     }
     *dst = 0;
-    free(buf);
     *out = outBuf;
     *outSz = (ULONG)strlen(outBuf);
     return S_OK;
@@ -713,4 +855,412 @@ HRESULT CSvgThumbnailProvider::RenderFallback(UINT cx, HBITMAP *phbmp, DWORD dwE
 
     *phbmp = hBmp;
     return S_OK;
+}
+
+// ──── WIC SVG Decoder ──────────────────────────────────────────
+
+static const GUID GUID_ContainerFormatSvg =
+    { 0xa6ba1b82, 0x2489, 0x4b33, { 0x9f, 0x3a, 0xca, 0x6b, 0x5c, 0x3a, 0x9a, 0x4b } };
+
+class CSvgWicFrameDecode : public IWICBitmapFrameDecode
+{
+public:
+    CSvgWicFrameDecode(IStream *pStream, UINT w, UINT h) : m_cRef(1), m_pStream(pStream), m_w(w), m_h(h)
+    {
+        if (m_pStream) m_pStream->AddRef();
+    }
+    ~CSvgWicFrameDecode() { if (m_pStream) m_pStream->Release(); }
+
+    IFACEMETHODIMP QueryInterface(REFIID riid, void **ppv)
+    {
+        if (!ppv) return E_POINTER;
+        *ppv = nullptr;
+        if (riid == IID_IUnknown || riid == IID_IWICBitmapSource || riid == IID_IWICBitmapFrameDecode)
+        {
+            *ppv = static_cast<IWICBitmapFrameDecode*>(this);
+            AddRef(); return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+    IFACEMETHODIMP_(ULONG) AddRef() { return InterlockedIncrement(&m_cRef); }
+    IFACEMETHODIMP_(ULONG) Release()
+    {
+        ULONG cRef = InterlockedDecrement(&m_cRef);
+        if (cRef == 0) delete this;
+        return cRef;
+    }
+
+    IFACEMETHODIMP GetSize(UINT *pw, UINT *ph) { if (pw) *pw = m_w; if (ph) *ph = m_h; return S_OK; }
+    IFACEMETHODIMP GetPixelFormat(WICPixelFormatGUID *pf) { if (pf) *pf = GUID_WICPixelFormat32bppBGRA; return S_OK; }
+    IFACEMETHODIMP GetResolution(double *dx, double *dy) { if (dx) *dx = 96; if (dy) *dy = 96; return S_OK; }
+
+    IFACEMETHODIMP CopyPixels(WICRect const *prc, UINT cbStride, UINT cbBufferSize, BYTE *pbBuffer)
+    {
+        if (!pbBuffer) return E_POINTER;
+        UINT stride = m_w * 4;
+        BYTE *tmp = (BYTE*)malloc((size_t)stride * m_h);
+        if (!tmp) return E_OUTOFMEMORY;
+        LARGE_INTEGER z = {};
+        m_pStream->Seek(z, STREAM_SEEK_SET, nullptr);
+        HRESULT hr = RenderSvgToBuffer(m_pStream, m_w, m_h, stride, tmp);
+        if (FAILED(hr)) { free(tmp); return hr; }
+        if (!prc)
+        {
+            if (cbBufferSize < stride * m_h) { free(tmp); return WINCODEC_ERR_INSUFFICIENTBUFFER; }
+            CopyMemory(pbBuffer, tmp, (size_t)stride * m_h);
+        }
+        else
+        {
+            for (int y = 0; y < prc->Height && (y + prc->Y) < (int)m_h; y++)
+            {
+                int sy = prc->Y + y;
+                if (sy < 0) continue;
+                int sx = prc->X, cw = prc->Width;
+                if (sx < 0) { cw += sx; sx = 0; }
+                if (sx >= (int)m_w || cw <= 0) continue;
+                if (sx + cw > (int)m_w) cw = m_w - sx;
+                CopyMemory(pbBuffer + y * cbStride, tmp + sy * stride + sx * 4, (size_t)cw * 4);
+            }
+        }
+        free(tmp);
+        return S_OK;
+    }
+
+    IFACEMETHODIMP CopyPalette(IWICPalette *) { return WINCODEC_ERR_UNSUPPORTEDOPERATION; }
+    IFACEMETHODIMP GetThumbnail(IWICBitmapSource **) { return WINCODEC_ERR_UNSUPPORTEDOPERATION; }
+    IFACEMETHODIMP GetColorContexts(UINT, IWICColorContext **, UINT *) { return WINCODEC_ERR_UNSUPPORTEDOPERATION; }
+    IFACEMETHODIMP GetMetadataQueryReader(IWICMetadataQueryReader **) { return WINCODEC_ERR_UNSUPPORTEDOPERATION; }
+
+private:
+    LONG m_cRef;
+    IStream *m_pStream;
+    UINT m_w, m_h;
+};
+
+class CSvgWicDecoder : public IWICBitmapDecoder
+{
+public:
+    CSvgWicDecoder() : m_cRef(1), m_pStream(nullptr), m_w(256), m_h(256), m_init(FALSE) {}
+    ~CSvgWicDecoder() { if (m_pStream) m_pStream->Release(); }
+
+    IFACEMETHODIMP QueryInterface(REFIID riid, void **ppv)
+    {
+        if (!ppv) return E_POINTER;
+        *ppv = nullptr;
+        if (riid == IID_IUnknown || riid == IID_IWICBitmapDecoder)
+        {
+            *ppv = static_cast<IWICBitmapDecoder*>(this);
+            AddRef(); return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+    IFACEMETHODIMP_(ULONG) AddRef() { return InterlockedIncrement(&m_cRef); }
+    IFACEMETHODIMP_(ULONG) Release()
+    {
+        ULONG cRef = InterlockedDecrement(&m_cRef);
+        if (cRef == 0) delete this;
+        return cRef;
+    }
+
+    IFACEMETHODIMP QueryCapability(IStream *pStream, DWORD *pCap)
+    {
+        if (!pStream || !pCap) return E_POINTER;
+        *pCap = 0;
+        char buf[256] = {};
+        LARGE_INTEGER z = {};
+        pStream->Seek(z, STREAM_SEEK_SET, nullptr);
+        ULONG r = 0;
+        pStream->Read(buf, 255, &r);
+        pStream->Seek(z, STREAM_SEEK_SET, nullptr);
+        if (strstr(buf, "<svg") || strstr(buf, "<SVG"))
+            *pCap = WICBitmapDecoderCapabilityCanDecodeAllImages |
+                    WICBitmapDecoderCapabilityCanDecodeSomeImages |
+                    WICBitmapDecoderCapabilityCanEnumerateMetadata;
+        return S_OK;
+    }
+    IFACEMETHODIMP Initialize(IStream *pStream, WICDecodeOptions)
+    {
+        if (m_init) return WINCODEC_ERR_WRONGSTATE;
+        LARGE_INTEGER z = {};
+        pStream->Seek(z, STREAM_SEEK_SET, nullptr);
+        STATSTG stat = {};
+        if (FAILED(pStream->Stat(&stat, STATFLAG_NONAME))) return E_FAIL;
+        ULONG sz = (ULONG)stat.cbSize.QuadPart;
+        if (sz == 0 || sz > 4194304) return WINCODEC_ERR_BADSTREAMDATA;
+        char *buf = (char*)malloc(sz + 1);
+        if (!buf) return E_OUTOFMEMORY;
+        ULONG r = 0;
+        pStream->Read(buf, sz, &r);
+        buf[sz] = 0;
+        pStream->Seek(z, STREAM_SEEK_SET, nullptr);
+        if (!strstr(buf, "<svg") && !strstr(buf, "<SVG"))
+        { free(buf); return WINCODEC_ERR_BADSTREAMDATA; }
+        float fw = 0, fh = 0;
+        GetSvgSizeFromBuffer(buf, sz, &fw, &fh);
+        free(buf);
+        if (fw > 0 && fh > 0) { m_w = (UINT)fw; m_h = (UINT)fh; }
+        if (m_w < 1) m_w = 1; if (m_h < 1) m_h = 1;
+        m_pStream = pStream;
+        m_pStream->AddRef();
+        m_init = TRUE;
+        return S_OK;
+    }
+    IFACEMETHODIMP GetContainerFormat(GUID *pG) { if (pG) *pG = GUID_ContainerFormatSvg; return S_OK; }
+    IFACEMETHODIMP GetFrameCount(UINT *pC) { if (pC) *pC = 1; return S_OK; }
+    IFACEMETHODIMP GetFrame(UINT idx, IWICBitmapFrameDecode **ppF)
+    {
+        if (!ppF) return E_POINTER;
+        *ppF = nullptr;
+        if (idx != 0) return WINCODEC_ERR_IMAGESIZEOUTOFRANGE;
+        if (!m_init) return WINCODEC_ERR_WRONGSTATE;
+        CSvgWicFrameDecode *pF = new (std::nothrow) CSvgWicFrameDecode(m_pStream, m_w, m_h);
+        if (!pF) return E_OUTOFMEMORY;
+        *ppF = pF;
+        pF->AddRef();
+        return S_OK;
+    }
+
+    IFACEMETHODIMP GetDecoderInfo(IWICBitmapDecoderInfo **) { return WINCODEC_ERR_UNSUPPORTEDOPERATION; }
+    IFACEMETHODIMP CopyPalette(IWICPalette *) { return WINCODEC_ERR_UNSUPPORTEDOPERATION; }
+    IFACEMETHODIMP GetMetadataQueryReader(IWICMetadataQueryReader **) { return WINCODEC_ERR_UNSUPPORTEDOPERATION; }
+    IFACEMETHODIMP GetPreview(IWICBitmapSource **) { return WINCODEC_ERR_UNSUPPORTEDOPERATION; }
+    IFACEMETHODIMP GetColorContexts(UINT, IWICColorContext **, UINT *) { return WINCODEC_ERR_UNSUPPORTEDOPERATION; }
+    IFACEMETHODIMP GetThumbnail(IWICBitmapSource **) { return WINCODEC_ERR_UNSUPPORTEDOPERATION; }
+
+private:
+    LONG m_cRef;
+    IStream *m_pStream;
+    UINT m_w, m_h;
+    BOOL m_init;
+};
+
+class CSvgWicDecoderFactory : public IClassFactory
+{
+public:
+    CSvgWicDecoderFactory() : m_cRef(1) {}
+    virtual ~CSvgWicDecoderFactory() {}
+
+    IFACEMETHODIMP QueryInterface(REFIID riid, void **ppv)
+    {
+        if (!ppv) return E_POINTER;
+        *ppv = nullptr;
+        if (riid == IID_IUnknown || riid == IID_IClassFactory)
+        {
+            *ppv = static_cast<IClassFactory*>(this);
+            AddRef(); return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+    IFACEMETHODIMP_(ULONG) AddRef() { return InterlockedIncrement(&m_cRef); }
+    IFACEMETHODIMP_(ULONG) Release()
+    {
+        ULONG cRef = InterlockedDecrement(&m_cRef);
+        if (cRef == 0) delete this;
+        return cRef;
+    }
+    IFACEMETHODIMP CreateInstance(IUnknown *pUnkOuter, REFIID riid, void **ppv)
+    {
+        *ppv = nullptr;
+        if (pUnkOuter) return CLASS_E_NOAGGREGATION;
+        CSvgWicDecoder *pDec = new (std::nothrow) CSvgWicDecoder();
+        if (!pDec) return E_OUTOFMEMORY;
+        HRESULT hr = pDec->QueryInterface(riid, ppv);
+        pDec->Release();
+        return hr;
+    }
+    IFACEMETHODIMP LockServer(BOOL) { return S_OK; }
+
+private:
+    LONG m_cRef;
+};
+
+static HRESULT CreateWicDecoderInstance(REFIID riid, void **ppv)
+{
+    CSvgWicDecoderFactory *pF = new (std::nothrow) CSvgWicDecoderFactory();
+    if (!pF) return E_OUTOFMEMORY;
+    HRESULT hr = pF->QueryInterface(riid, ppv);
+    pF->Release();
+    return hr;
+}
+
+// ──── RenderSvgToBuffer ─────────────────────────────────────────
+
+static HRESULT GetSvgSizeFromStream(IStream *pStream, float *pW, float *pH)
+{
+    *pW = 0; *pH = 0;
+    STATSTG stat = {};
+    if (FAILED(pStream->Stat(&stat, STATFLAG_NONAME))) return E_FAIL;
+    ULONG sz = (ULONG)stat.cbSize.QuadPart;
+    if (sz == 0 || sz > 65536) return E_FAIL;
+    char *buf = (char*)malloc(sz + 1);
+    if (!buf) return E_OUTOFMEMORY;
+    LARGE_INTEGER z = {};
+    pStream->Seek(z, STREAM_SEEK_SET, nullptr);
+    ULONG r = 0;
+    pStream->Read(buf, sz, &r);
+    buf[sz] = 0;
+    HRESULT hr = GetSvgSizeFromBuffer(buf, sz, pW, pH);
+    free(buf);
+    pStream->Seek(z, STREAM_SEEK_SET, nullptr);
+    return hr;
+}
+
+static HRESULT RenderSvgToBuffer(IStream *pStream, UINT width, UINT height, UINT stride, BYTE *pixels)
+{
+    if (!pStream || !pixels || width == 0 || height == 0) return E_INVALIDARG;
+    HRESULT hr;
+
+    STATSTG stat = {};
+    if (FAILED(pStream->Stat(&stat, STATFLAG_NONAME))) return E_FAIL;
+    ULONG sz = (ULONG)stat.cbSize.QuadPart;
+    if (sz == 0 || sz > 4194304) return E_FAIL;
+    char *buf = (char*)malloc(sz + 1);
+    if (!buf) return E_OUTOFMEMORY;
+    LARGE_INTEGER z = {};
+    pStream->Seek(z, STREAM_SEEK_SET, nullptr);
+    ULONG r = 0;
+    pStream->Read(buf, sz, &r);
+    buf[sz] = 0;
+
+    char *svgBuf = buf;
+    ULONG svgSz = sz;
+    char *inlined = nullptr;
+    if (strstr(buf, "<style") && SUCCEEDED(InlineSvgCss(buf, sz, &inlined, &svgSz)) && inlined)
+    { free(buf); svgBuf = inlined; }
+
+    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, svgSz);
+    IStream *pSvgStream = nullptr;
+    if (hg)
+    {
+        void *dst = GlobalLock(hg);
+        if (dst) { CopyMemory(dst, svgBuf, svgSz); GlobalUnlock(hg); }
+        CreateStreamOnHGlobal(hg, TRUE, &pSvgStream);
+    }
+    if (svgBuf != buf) free(svgBuf);
+    else free(buf);
+    if (!pSvgStream) return E_OUTOFMEMORY;
+
+    float svgW = 0, svgH = 0;
+    FLOAT vpW = (FLOAT)width * 2, vpH = (FLOAT)height * 2;
+    GetSvgSizeFromStream(pSvgStream, &svgW, &svgH);
+    if (svgW > 0 && svgH > 0) { vpW = max(vpW, svgW); vpH = max(vpH, svgH); }
+    UINT rtw = (UINT)min(2048.0f, max(vpW, (FLOAT)width));
+    UINT rth = (UINT)min(2048.0f, max(vpH, (FLOAT)height));
+    if (rtw < 1) rtw = 1; if (rth < 1) rth = 1;
+
+    ID3D11Device *pD3D = nullptr;
+    hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &pD3D, nullptr, nullptr);
+    if (FAILED(hr)) { pSvgStream->Release(); return E_FAIL; }
+
+    IDXGIDevice *pDXGI = nullptr;
+    hr = pD3D->QueryInterface(IID_PPV_ARGS(&pDXGI));
+    if (FAILED(hr)) { pD3D->Release(); pSvgStream->Release(); return E_FAIL; }
+
+    ID2D1Factory5 *pFactory = nullptr;
+    hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, IID_PPV_ARGS(&pFactory));
+    if (FAILED(hr)) { pDXGI->Release(); pD3D->Release(); pSvgStream->Release(); return E_FAIL; }
+
+    ID2D1Device *pDevice = nullptr;
+    hr = pFactory->CreateDevice(pDXGI, &pDevice);
+    if (FAILED(hr)) { pFactory->Release(); pDXGI->Release(); pD3D->Release(); pSvgStream->Release(); return E_FAIL; }
+
+    ID2D1DeviceContext *pDC = nullptr;
+    hr = pDevice->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &pDC);
+    if (FAILED(hr)) { pDevice->Release(); pFactory->Release(); pDXGI->Release(); pD3D->Release(); pSvgStream->Release(); return E_FAIL; }
+
+    ID2D1DeviceContext5 *pDC5 = nullptr;
+    hr = pDC->QueryInterface(IID_PPV_ARGS(&pDC5));
+    pDC->Release();
+    if (FAILED(hr)) { pDevice->Release(); pFactory->Release(); pDXGI->Release(); pD3D->Release(); pSvgStream->Release(); return E_FAIL; }
+    pDevice->Release(); pDXGI->Release();
+
+    ID3D11Texture2D *pRT = nullptr;
+    {
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = rtw; td.Height = rth; td.MipLevels = 1; td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET;
+        hr = pD3D->CreateTexture2D(&td, nullptr, &pRT);
+    }
+    if (FAILED(hr)) { pDC5->Release(); pFactory->Release(); pD3D->Release(); pSvgStream->Release(); return E_FAIL; }
+
+    IDXGISurface *pSurf = nullptr;
+    hr = pRT->QueryInterface(IID_PPV_ARGS(&pSurf));
+    if (FAILED(hr)) { pRT->Release(); pDC5->Release(); pFactory->Release(); pD3D->Release(); pSvgStream->Release(); return E_FAIL; }
+
+    ID2D1Bitmap1 *pTarget = nullptr;
+    hr = pDC5->CreateBitmapFromDxgiSurface(pSurf, nullptr, &pTarget);
+    pSurf->Release();
+    if (FAILED(hr)) { pRT->Release(); pDC5->Release(); pFactory->Release(); pD3D->Release(); pSvgStream->Release(); return E_FAIL; }
+
+    LARGE_INTEGER lz = {};
+    pSvgStream->Seek(lz, STREAM_SEEK_SET, nullptr);
+    ID2D1SvgDocument *pSvg = nullptr;
+    hr = pDC5->CreateSvgDocument(pSvgStream, D2D1::SizeF((FLOAT)rtw, (FLOAT)rth), &pSvg);
+    if (FAILED(hr)) { pTarget->Release(); pRT->Release(); pDC5->Release(); pFactory->Release(); pD3D->Release(); pSvgStream->Release(); return E_FAIL; }
+
+    ID3D11DeviceContext *pCtx = nullptr;
+    hr = S_OK;
+    __try
+    {
+        pDC5->SetTarget(pTarget);
+        pDC5->BeginDraw();
+        pDC5->Clear(D2D1::ColorF(0, 0, 0, 0));
+        pDC5->DrawSvgDocument(pSvg);
+        hr = pDC5->EndDraw();
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { hr = E_FAIL; }
+
+    if (SUCCEEDED(hr))
+    {
+        D3D11_TEXTURE2D_DESC td = {};
+        pRT->GetDesc(&td);
+        td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0;
+        td.CPUAccessFlags = D3D11_CPU_ACCESS_READ; td.MiscFlags = 0;
+        ID3D11Texture2D *pStaging = nullptr;
+        if (SUCCEEDED(pD3D->CreateTexture2D(&td, nullptr, &pStaging)))
+        {
+            pD3D->GetImmediateContext(&pCtx);
+            pCtx->CopyResource(pStaging, pRT);
+            D3D11_MAPPED_SUBRESOURCE map = {};
+            if (SUCCEEDED(pCtx->Map(pStaging, 0, D3D11_MAP_READ, 0, &map)))
+            {
+                BYTE *src = (BYTE*)map.pData;
+                int srcW = (int)(width * (rtw / (FLOAT)max(rtw, rth)));
+                int srcH = (int)(height * (rth / (FLOAT)max(rtw, rth)));
+                int xOff = ((int)width - srcW) / 2;
+                int yOff = ((int)height - srcH) / 2;
+                ZeroMemory(pixels, (size_t)stride * height);
+                FLOAT stepX = (FLOAT)rtw / (FLOAT)srcW;
+                FLOAT stepY = (FLOAT)rth / (FLOAT)srcH;
+                for (int y = 0; y < srcH && yOff + y < (int)height; y++)
+                {
+                    FLOAT sy = y * stepY;
+                    int iy0 = (int)sy, iy1 = min(iy0 + 1, (int)rth - 1);
+                    FLOAT fy = sy - iy0;
+                    BYTE *dstLine = pixels + (yOff + y) * stride + xOff * 4;
+                    for (int x = 0; x < srcW && xOff + x < (int)width; x++)
+                    {
+                        FLOAT sx = x * stepX;
+                        int ix0 = (int)sx, ix1 = min(ix0 + 1, (int)rtw - 1);
+                        FLOAT fx = sx - ix0;
+                        for (int c = 0; c < 4; c++)
+                        {
+                            FLOAT v = (1-fy)*((1-fx)*src[iy0*map.RowPitch+ix0*4+c]+fx*src[iy0*map.RowPitch+ix1*4+c])
+                                    + fy *((1-fx)*src[iy1*map.RowPitch+ix0*4+c]+fx*src[iy1*map.RowPitch+ix1*4+c]);
+                            dstLine[x*4+c] = (BYTE)(v + 0.5f);
+                        }
+                    }
+                }
+                pCtx->Unmap(pStaging, 0);
+            }
+            pStaging->Release();
+        }
+    }
+
+    if (pCtx) pCtx->Release();
+    pSvg->Release(); pTarget->Release(); pRT->Release();
+    pDC5->Release(); pFactory->Release(); pD3D->Release();
+    pSvgStream->Release();
+    return hr;
 }
